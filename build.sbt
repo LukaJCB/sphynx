@@ -15,9 +15,9 @@ scalacOptions ++= Seq(
 val CompileTime = config("compile-time").hide
 
 libraryDependencies ++= Seq(
-  "org.typelevel" %% "cats-core" % "1.0.0",
+  "org.typelevel" %% "cats-core" % "1.1.0",
   "com.github.mpilquist" %% "simulacrum" % "0.11.0"  % CompileTime,
-  "org.typelevel" %% "cats-effect" % "0.6" % Test,
+  "org.typelevel" %% "cats-effect" % "1.0.0-RC" % Test,
   "io.monix" %% "minitest" % "2.0.0" % Test
 )
 

@@ -8,6 +8,11 @@ object CrazyInterpreter extends KVStore[IO] {
   var inserts: Map[String, Int] = Map.empty
 
 
+  def flush: IO[Unit] = IO {
+    searches = Map.empty
+    inserts = Map.empty
+  }
+
   def get(key: String) = IO {
     searches = searches.updated(key, searches.get(key).getOrElse(0) + 1)
     Option(key + "!")
