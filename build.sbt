@@ -16,6 +16,7 @@ val CompileTime = config("compile-time").hide
 
 libraryDependencies ++= Seq(
   "org.typelevel" %% "cats-core" % "1.1.0",
+  "com.kailuowang" %% "mainecoon-core" % "0.6.3",
   "com.github.mpilquist" %% "simulacrum" % "0.11.0"  % CompileTime,
   "org.typelevel" %% "cats-effect" % "1.0.0-RC" % Test,
   "io.monix" %% "minitest" % "2.0.0" % Test

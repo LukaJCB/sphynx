@@ -2,23 +2,25 @@ package sphynx
 
 import cats.effect._
 
-object CrazyInterpreter extends KVStore[IO] {
+trait CrazyInterpreter extends KVStore[IO] {
+  def searches: Map[String, Int]
+  def inserts: Map[String, Int]
+}
 
-  var searches: Map[String, Int] = Map.empty
-  var inserts: Map[String, Int] = Map.empty
+object CrazyInterpreter {
 
+  def create: IO[CrazyInterpreter] = IO(new CrazyInterpreter {
 
-  def flush: IO[Unit] = IO {
-    searches = Map.empty
-    inserts = Map.empty
-  }
+    var searches: Map[String, Int] = Map.empty
+    var inserts: Map[String, Int] = Map.empty
 
-  def get(key: String) = IO {
-    searches = searches.updated(key, searches.get(key).getOrElse(0) + 1)
-    Option(key + "!")
-  }
+    def get(key: String) = IO {
+      searches = searches.updated(key, searches.get(key).getOrElse(0) + 1)
+      Option(key + "!")
+    }
 
-  def put(key: String, a: String) = IO {
-    inserts = inserts.updated(key, inserts.get(key).getOrElse(0) + 1)
-  }
+    def put(key: String, a: String) = IO {
+      inserts = inserts.updated(key, inserts.get(key).getOrElse(0) + 1)
+    }
+  })
 }

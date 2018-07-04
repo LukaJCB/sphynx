@@ -5,6 +5,7 @@ import cats.implicits._
 import cats._
 import cats.data._
 import cats.effect._
+import mainecoon.{CartesianK, FunctorK}
 
 object OptimizerTest extends SimpleTestSuite {
 
@@ -37,16 +38,21 @@ object OptimizerTest extends SimpleTestSuite {
 
   }
 
-  case class KVStoreInfo(gets: Set[String], puts: Map[String, String])
+  def rebuildPutGet(info: KVStoreInfo, interp: KVStore[IO]): IO[KVStore[IO]] =
+    info.queries.toList.filterNot(info.cache.contains)
+      .parTraverse(key => interp.get(key).map(_.map(s => (key, s))))
+      .map { list =>
+        val table: Map[String, String] = list.flatten.toMap
 
-  object KVStoreInfo {
-    implicit val infoMonoid: Monoid[KVStoreInfo] = new Monoid[KVStoreInfo] {
-      def combine(a: KVStoreInfo, b: KVStoreInfo): KVStoreInfo =
-        KVStoreInfo(a.gets |+| b.gets, a.puts |+| b.puts)
+        new KVStore[IO] {
+          def get(key: String) = table.get(key).orElse(info.cache.get(key)) match {
+            case Some(a) => Option(a).pure[IO]
+            case None => interp.get(key)
+          }
 
-      def empty: KVStoreInfo = KVStoreInfo(Set.empty, Map.empty)
-    }
-  }
+          def put(key: String, a: String): IO[Unit] = interp.put(key, a)
+        }
+      }
 
   def kVStorePutGetEliminizer: Optimizer[KVStore, IO] = new Optimizer[KVStore, IO] {
     type M = KVStoreInfo
@@ -64,13 +70,13 @@ object OptimizerTest extends SimpleTestSuite {
     }
 
     def rebuild(info: KVStoreInfo, interp: KVStore[IO]): IO[KVStore[IO]] =
-      info.gets.toList.filterNot(info.puts.contains)
+      info.queries.toList.filterNot(info.cache.contains)
         .parTraverse(key => interp.get(key).map(_.map(s => (key, s))))
         .map { list =>
           val table: Map[String, String] = list.flatten.toMap
 
           new KVStore[IO] {
-            def get(key: String) = table.get(key).orElse(info.puts.get(key)) match {
+            def get(key: String) = table.get(key).orElse(info.cache.get(key)) match {
               case Some(a) => Option(a).pure[IO]
               case None => interp.get(key)
             }
@@ -80,30 +86,69 @@ object OptimizerTest extends SimpleTestSuite {
         }
   }
 
+
+  def kVStorePutGetMonadEliminizer[F[_]: Sync]: MonadOptimizer[KVStore, F] = new MonadOptimizer[KVStore, F] {
+    type M = Map[String, String]
+
+    def monoidM = implicitly
+
+    def monadF = implicitly
+
+    def functorK: FunctorK[KVStore] = implicitly
+    def semigroupalK: CartesianK[KVStore] = implicitly
+
+    def rebuild(interp: KVStore[F]): KVStore[Kleisli[F, M, ?]] = new KVStore[Kleisli[F, M, ?]] {
+      def get(key: String): Kleisli[F, M, Option[String]] = Kleisli(m => m.get(key) match {
+        case o @ Some(_) => Applicative[F].pure(o)
+        case None => interp.get(key)
+      })
+
+      def put(key: String, a: String): Kleisli[F, M, Unit] = Kleisli(m => interp.put(key, a))
+    }
+
+    def extract: KVStore[? => M] = new KVStore[? => M] {
+      def get(key: String): Option[String] => M = {
+        case Some(s) => Map(key -> s)
+        case None => Map.empty
+      }
+
+      def put(key: String, a: String): Unit => M =
+        _ => Map(key -> a)
+    }
+
+  }
+
+  test("MonadOptimizer should optimize duplicates and put-get-elimination") {
+    implicit val optimize: MonadOptimizer[KVStore, IO] = kVStorePutGetMonadEliminizer[IO]
+
+    val interp = CrazyInterpreter.create.unsafeRunSync()
+
+    val result = optimize.optimizeM(Programs.monadProgram).apply(interp).unsafeRunSync()
+
+
+    assertEquals(interp.searches.size, 2)
+    assertEquals(interp.inserts.size, 3)
+
+    val control = Programs.monadProgram(interp).unsafeRunSync()
+
+    assertEquals(result, control)
+
+  }
+
   test("Optimizer should optimize duplicates and put-get-elimination") {
 
     implicit val optimize: Optimizer[KVStore, IO] = kVStorePutGetEliminizer
 
-    val gets = List("Dog", "Bird", "Mouse", "Bird")
-    val puts = List("Cat" -> "Cat!", "Dog" ->"Dog!")
-
-    def program[F[_]: Applicative](F: KVStore[F]): F[List[String]] =
-      puts.traverse(t => F.put(t._1, t._2)) *> gets.traverse(F.get).map(_.flatten)
-
-
-    val p = new ApplicativeProgram[KVStore, List[String]] {
-      def apply[F[_]: Applicative](alg: KVStore[F]): F[List[String]] = program(alg)
-    }
-
+    val interp = CrazyInterpreter.create.unsafeRunSync()
 
     val result = optimize
-      .optimize(p)(CrazyInterpreter)
+      .optimize(Programs.putGetProgram)(interp)
       .unsafeRunSync()
 
-    assertEquals(CrazyInterpreter.searches.size, 2)
-    assertEquals(CrazyInterpreter.inserts.size, 2)
+    assertEquals(interp.searches.size, 2)
+    assertEquals(interp.inserts.size, 2)
 
-    val control = program(CrazyInterpreter).unsafeRunSync()
+    val control = Programs.putGetProgram(interp).unsafeRunSync()
 
     assertEquals(result, control)
 
@@ -114,23 +159,14 @@ object OptimizerTest extends SimpleTestSuite {
 
     implicit val optimizer: SemigroupalOptimizer[KVStore, IO] = kVStoreIOOptimizer
 
-    def program[F[_]: Apply](F: KVStore[F]): F[List[String]] =
-      (F.get("Cats"), F.get("Dogs"), F.put("Mice", "mouse"), F.get("Cats"))
-        .mapN((f, s, _, t) => List(f, s, t).flatten)
+    val interp = CrazyInterpreter.create.unsafeRunSync()
 
+    val result = optimizer.nonEmptyOptimize(Programs.applicativeProgram)(interp).unsafeRunSync()
 
-    val p = new ApplyProgram[KVStore, List[String]] {
-      def apply[F[_]: Apply](alg: KVStore[F]): F[List[String]] = program(alg)
-    }
+    assertEquals(interp.inserts.size, 1)
+    assertEquals(interp.searches.size, 2)
 
-    CrazyInterpreter.flush.unsafeRunSync()
-
-    val result = optimizer.nonEmptyOptimize(p)(CrazyInterpreter).unsafeRunSync()
-
-    assertEquals(CrazyInterpreter.inserts.size, 1)
-    assertEquals(CrazyInterpreter.searches.size, 2)
-
-    val control = program(CrazyInterpreter).unsafeRunSync()
+    val control = Programs.applicativeProgram(interp).unsafeRunSync()
 
     assertEquals(result, control)
   }
@@ -150,13 +186,13 @@ object OptimizerTest extends SimpleTestSuite {
       def apply[F[_]: Applicative](alg: KVStore[F]): F[List[String]] = program(alg)
     }
 
-    CrazyInterpreter.flush.unsafeRunSync()
+    val interp = CrazyInterpreter.create.unsafeRunSync()
 
-    val result = optimizer.optimize(p)(CrazyInterpreter).unsafeRunSync()
+    val result = optimizer.optimize(p)(interp).unsafeRunSync()
 
-    assertEquals(CrazyInterpreter.searches.size, 3)
+    assertEquals(interp.searches.size, 3)
 
-    val control = program(CrazyInterpreter).unsafeRunSync()
+    val control = program(interp).unsafeRunSync()
 
     assertEquals(result, control)
   }
